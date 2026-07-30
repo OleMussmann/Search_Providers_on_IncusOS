@@ -1,0 +1,4 @@
+.env
+.claude
+searxng/settings.yml
+compose.incus.yaml

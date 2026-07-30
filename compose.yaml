@@ -1,0 +1,159 @@
+name: firecrawl
+
+x-common-service: &common-service
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+      compress: "true"
+
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379
+  REDIS_RATE_LIMIT_URL: redis://redis:6379
+  PLAYWRIGHT_MICROSERVICE_URL: http://playwright-service:3000/scrape
+  POSTGRES_HOST: nuq-postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  POSTGRES_DB: ${POSTGRES_DB:-postgres}
+  NUQ_RABBITMQ_URL: amqp://rabbitmq:5672
+  USE_DB_AUTHENTICATION: "false"
+  BULL_AUTH_KEY: ${BULL_AUTH_KEY}
+  SEARXNG_ENDPOINT: http://searxng:8080
+  NUM_WORKERS_PER_QUEUE: ${NUM_WORKERS_PER_QUEUE:-8}
+  CRAWL_CONCURRENT_REQUESTS: ${CRAWL_CONCURRENT_REQUESTS:-10}
+  LOGGING_LEVEL: ${LOGGING_LEVEL:-info}
+
+services:
+  redis:
+    image: docker.io/redis:alpine
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        compress: "true"
+
+  rabbitmq:
+    image: docker.io/rabbitmq:3-management
+    environment:
+      HOME: /var/lib/rabbitmq
+    # No healthcheck: ic-healthd latches the first failure into `unhealthy` and
+    # never re-probes, and rabbitmq needs ~12s+ to boot. Any probe here
+    # permanently blocks `api`. firecrawl reconnects to AMQP on its own.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        compress: "true"
+
+  nuq-postgres:
+    <<: *common-service
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    command: -c cron.database_name=firecrawl
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # incus-compose gives the entrypoint a TTY, so psql running the initdb
+      # scripts pipes output into `less` and blocks forever. Without this,
+      # initdb never finishes and the nuq schema is never created.
+      PSQL_PAGER: cat
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U $${POSTGRES_USER:-postgres}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+  # Idempotent replay of the image's initdb script. Reuses the same image (it
+  # already ships psql + the SQL), so a half-finished initdb can't leave the
+  # nuq schema missing.
+  nuq-init:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    entrypoint: ["psql"]
+    command: >
+      -v ON_ERROR_STOP=1
+      -h nuq-postgres -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}
+      -f /docker-entrypoint-initdb.d/010-nuq.sql
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      PSQL_PAGER: cat
+    depends_on:
+      nuq-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  playwright-service:
+    <<: *common-service
+    image: ghcr.io/firecrawl/playwright-service:latest
+    environment:
+      PORT: 3000
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+      ALLOW_LOCAL_WEBHOOKS: ${ALLOW_LOCAL_WEBHOOKS:-}
+      BLOCK_MEDIA: ${BLOCK_MEDIA:-}
+      MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
+    cpus: 2.0
+    mem_limit: 4G
+    memswap_limit: 4G
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=1g
+
+  searxng:
+    <<: *common-service
+    image: docker.io/searxng/searxng:latest
+    environment:
+      # The image declares VOLUME /etc/searxng, which Incus honors with a
+      # tmpfs. Anything written to that path in the stopped rootfs (`configs:`,
+      # secrets, a single-file seed) is masked at boot, and the entrypoint then
+      # generates a stock settings.yml into the tmpfs. So point SearXNG at a
+      # path that is NOT under any VOLUME. settings_loader.py accepts a file
+      # here and it takes precedence over the /etc/searxng fallback.
+      SEARXNG_SETTINGS_PATH: /etc/searxng-repo/settings.yml
+    volumes:
+      # Seeded *single-file* bind. This is the only path in incus-compose that
+      # sets Overwrite: true, and PushFiles runs inside start() on every start,
+      # so the repo file is re-pushed on every `up` — no storage volume to
+      # delete, no drift. A seeded *directory* bind would instead create a
+      # storage volume that is populated once, at creation only.
+      # `seed: true` is mandatory: plain binds are refused unless the client
+      # and the Incus host are the same machine, and this stack is remote.
+      - type: bind
+        source: ./searxng/settings.yml
+        target: /etc/searxng-repo/settings.yml
+        x-incus-compose:
+          seed: true
+
+  api:
+    <<: *common-service
+    image: ghcr.io/firecrawl/firecrawl:latest
+    environment:
+      <<: *common-env
+      HOST: "0.0.0.0"
+      PORT: "3002"
+    depends_on:
+      redis:
+        condition: service_started
+      playwright-service:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+      nuq-postgres:
+        condition: service_healthy
+      nuq-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    cpus: 4.0
+    mem_limit: 8G
+    memswap_limit: 8G
+
+volumes:
+  pgdata:

@@ -26,3 +26,9 @@ engines:
   - name: core.ac.uk
     api_key: "CHANGE_ME"
     inactive: false
+    # api.core.ac.uk routinely takes 8-15s to answer, so the 3.0s default from
+    # `outgoing.request_timeout` times out on every single query. Note this
+    # raises the *whole search's* deadline (SearXNG uses the max engine timeout
+    # as the overall budget), but core is science-category only, so general
+    # searches are unaffected.
+    timeout: 20.0

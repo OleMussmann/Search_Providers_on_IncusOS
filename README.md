@@ -135,18 +135,31 @@ SearXNG's settings loader accepts a *file* for that variable and it takes preced
 the `/etc/searxng` fallback.
 
 A **single-file** seeded bind is deliberate. It's the only path in incus-compose that sets
-`Overwrite: true`, and the push runs inside `start()` on every start — so editing
-`searxng/settings.yml` and re-running `incus-compose up -d` re-applies it, every time. A
-seeded *directory* bind instead creates an Incus storage volume that is populated only on
-first creation, which means host edits silently stop taking effect until you delete the
-volume. `seed: true` is mandatory either way: plain bind mounts are refused unless the
-client and the Incus host are the same machine, and this stack is driven over an HTTPS
-remote.
+`Overwrite: true`, and the push runs inside `start()` on every start. A seeded *directory*
+bind instead creates an Incus storage volume that is populated only on first creation, which
+means host edits silently stop taking effect until you delete the volume. `seed: true` is
+mandatory either way: plain bind mounts are refused unless the client and the Incus host are
+the same machine, and this stack is driven over an HTTPS remote.
 
-Corollary: the container's `/etc/searxng-repo/settings.yml` is overwritten from the repo on
-every start, so don't edit it in place with `incus-compose exec` — your changes will be
-silently reverted on the next `up`. Edit `searxng/settings.yml` and re-run
-`incus-compose up -d`.
+**But `incus-compose up -d` alone does not re-apply an edited `settings.yml`.** The push
+happens inside `start()`, and `up` skips `start()` for an instance that is already running
+(`start instance searxng-1: error: resource is already running`) — so the container keeps
+the old file, with no indication anything was skipped. Stop the service first:
+
+```
+incus-compose stop searxng
+incus-compose up -d
+```
+
+Then confirm the new content actually landed before concluding your change didn't work:
+
+```
+incus-compose exec searxng -- cat /etc/searxng-repo/settings.yml
+```
+
+Corollary: `/etc/searxng-repo/settings.yml` is overwritten from the repo on every *start*,
+so don't edit it in place with `incus-compose exec` — your changes are silently reverted the
+next time the container starts. Edit `searxng/settings.yml` and do the stop/up cycle above.
 
 Note that `/etc/searxng` still exists in the container as an entrypoint-generated stock
 config on a tmpfs. It is unused and safe to ignore — but it means "there's a settings.yml in
@@ -235,6 +248,28 @@ that doesn't obviously point at its cause.
   `service_completed_successfully`.
 - **SearXNG config can't be delivered by `configs:`** — see
   [the section above](#getting-that-config-into-the-container-why-it-isnt-configs).
+- **Slow engines need an explicit per-engine `timeout`.** SearXNG's global
+  `outgoing.request_timeout` default is 3.0s, and an engine that doesn't ship its own
+  override inherits it. `core.ac.uk` is the case in point: `api.core.ac.uk` routinely takes
+  8–15s to answer, so *every* CORE query timed out and the engine looked broken —
+  `unresponsive_engines: [["core.ac.uk", "timeout"]]` with an otherwise healthy 200. Hence
+  the `timeout: 20.0` on that engine in `searxng/settings.yml`.
+
+  Two things to know before copying this pattern to other engines. First, SearXNG uses the
+  **maximum** engine timeout in a search as the deadline for that whole search, so a slow
+  engine drags out every search it participates in — acceptable here only because CORE is
+  `science`-category and never runs on general queries. Second, `outgoing.max_request_timeout`
+  is commented out (i.e. `None`) in the stock settings, which is what lets a per-engine value
+  exceed the default at all; setting it would silently cap every engine back down.
+
+  Diagnosing this class of problem: `curl <host>:8888/config` reports the effective `timeout`
+  per engine, which is the fastest way to tell "engine is misconfigured" from "engine is
+  merely slow".
+- **CORE's own API is flaky, independent of the above.** `api.core.ac.uk` intermittently
+  returns HTTP 500 wrapping an Azure `503 ... exceeded the limits of its provisioned
+  capacity` — reproducible with plain `curl`, so it is upstream capacity throttling, not
+  anything in this stack. Expect an occasional `[["core.ac.uk", "HTTP error"]]` in
+  `unresponsive_engines`; retrying the query works. Don't chase it as a config bug.
 
 ## Design choices
 

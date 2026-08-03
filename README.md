@@ -102,11 +102,35 @@ Hex-only output sidesteps `.env` parsing pitfalls (`$` triggers variable interpo
 `#` starts a comment) and `BULL_AUTH_KEY` in particular gets pasted directly into a URL
 path (`/admin/<key>/queues`), so avoiding `/` and spaces there matters too.
 
-`compose.incus.yaml` is committed with a concrete Tailscale IP rather than a placeholder.
+`compose.incus.yaml` is gitignored (it holds your real Tailscale IP); the committed
+template `compose.incus.yaml.example` ships with a placeholder.
 Replace it with your own IncusOS host's Tailscale IP for both the `api` (port 3002) and
 `searxng` (port 8888→8080) mappings. Binding to the Tailscale address specifically — rather
 than `0.0.0.0` — is what keeps these services off the public internet, so don't drop the
 host-IP prefix from those port mappings.
+
+Both mappings use **long-form ports with `x-incus-compose.nat: true`** (kernel NAT proxy
+mode, incus-compose 1.1.0+). This is faster than the default userspace proxy (which
+routes through the host's loopback and appears to the service as `127.0.0.1`).
+
+**Gotcha — `api`'s port lives ONLY in the overlay, not in `compose.yaml`.** Compose
+*merges* port lists across files; it does not replace. `compose.yaml` declaring
+`ports: ["3002:3002"]` alongside the overlay's NAT entry produced two devices both named
+`proxy-3002`, and the userspace `127.0.0.1` entry won the name collision — breaking
+start with `Connect IP "127.0.0.1" must be one of the instance's static IPv4 addresses`.
+This was harmless pre-NAT (both entries were userspace); the NAT flip exposed it. The
+port is declared only in `compose.incus.yaml` now; don't re-add it to `compose.yaml`.
+
+Other proxy-NAT facts worth knowing (Incus server is 7.3):
+- NAT proxy needs Incus 7.2+ (or 7.0.1 LTS); below that the port is skipped with a
+  warning. Requesting `nat` on an older server fails visibly, not silently.
+- Instances here have no static NIC IP, so the connect address is `0.0.0.0` and Incus
+  resolves the real instance IP via ARP/NDP detection at runtime (`device show` shows
+  `connect: tcp:0.0.0.0:<port>`, which is expected — not a misconfig).
+- NAT mode routes to the instance's real address, so host-local access to the host's
+  own tailnet IP may behave differently than loopback-style userspace proxying; nothing
+  in this stack depends on host-local access (use a tailnet peer or the container
+  bridge IP).
 
 Copy `searxng/settings.yml.example` to `searxng/settings.yml` and fill in the `secret_key`
 (`openssl rand -hex 32`) plus your Brave/Exa/CORE API keys. Make sure `search.formats`

@@ -149,8 +149,9 @@ services:
       nuq-init:
         condition: service_completed_successfully
     restart: unless-stopped
-    ports:
-      - "3002:3002"
+    # Port published via compose.incus.yaml only (Tailscale-scoped + NAT).
+    # Declaring it here too would merge with the overlay's entry, producing
+    # a duplicate proxy-3002 device that collides on device name.
     cpus: 4.0
     mem_limit: 8G
     memswap_limit: 8G

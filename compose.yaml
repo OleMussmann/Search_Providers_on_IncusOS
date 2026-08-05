@@ -28,6 +28,7 @@ x-common-env: &common-env
 services:
   redis:
     image: docker.io/redis:alpine
+    restart: unless-stopped
     logging:
       driver: "json-file"
       options:
@@ -37,6 +38,7 @@ services:
 
   rabbitmq:
     image: docker.io/rabbitmq:3-management
+    restart: unless-stopped
     environment:
       HOME: /var/lib/rabbitmq
     # No healthcheck: ic-healthd latches the first failure into `unhealthy` and
@@ -52,6 +54,7 @@ services:
   nuq-postgres:
     <<: *common-service
     image: ghcr.io/firecrawl/nuq-postgres:latest
+    restart: unless-stopped
     command: -c cron.database_name=firecrawl
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -91,6 +94,7 @@ services:
   playwright-service:
     <<: *common-service
     image: ghcr.io/firecrawl/playwright-service:latest
+    restart: unless-stopped
     environment:
       PORT: 3000
       PROXY_SERVER: ${PROXY_SERVER:-}
@@ -108,6 +112,7 @@ services:
   searxng:
     <<: *common-service
     image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
     environment:
       # The image declares VOLUME /etc/searxng, which Incus honors with a
       # tmpfs. Anything written to that path in the stopped rootfs (`configs:`,

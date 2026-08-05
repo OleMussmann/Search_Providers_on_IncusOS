@@ -226,8 +226,8 @@ incus-compose incus delete -f searxng-1
 ## Verifying it works
 
 ```
-curl http://<tailscale-ip>:3002/test
-# → "Hello, world!"
+curl http://<tailscale-ip>:3002/
+# → {"message":"Firecrawl API",...}
 
 curl -X POST http://<tailscale-ip>:3002/v1/crawl \
   -H 'Content-Type: application/json' \

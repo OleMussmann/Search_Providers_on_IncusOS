@@ -195,24 +195,31 @@ config on a tmpfs. It is unused and safe to ignore — but it means "there's a s
 # Start everything (detached — always use -d for anything long-running;
 # foreground mode's behavior on a killed/interrupted client process is
 # not something to rely on for lifecycle control)
-incus-compose up -d
+# Both env files: pins live in versions.env, secrets in .env.
+incus-compose --env-file .env --env-file versions.env up -d
 
 # Check status (add -a to include stopped instances — nuq-init is
 # expected to be stopped once it has completed)
-incus-compose ps -a
+incus-compose --env-file .env --env-file versions.env ps -a
 
 # Follow logs
-incus-compose logs -f api
+incus-compose --env-file .env --env-file versions.env logs -f api
 
 # Stop and remove containers (keeps volumes and cached images)
-incus-compose down
+incus-compose --env-file .env --env-file versions.env down
 
 # Also delete volumes — this drops the Postgres queue data in `pgdata`
-incus-compose down --volumes
+incus-compose --env-file .env --env-file versions.env down --volumes
 
 # Full teardown: remove the whole Incus project
-incus-compose down --project
+incus-compose --env-file .env --env-file versions.env down --project
 ```
+
+Pin updates are managed by `incus-compose-update`
+([github.com/OleMussmann/incus-compose-update](https://github.com/OleMussmann/incus-compose-update))
+in the same way as the Hermes stack. `STACK_DIRS` should include both stack
+directories; `INCUS_COMPOSE_ENV_FILE='.env,versions.env'` removes the need to
+pass `--env-file` manually on every invocation.
 
 Prefer `incus-compose` over plain `incus` for day-to-day work — it scopes every operation to
 the `firecrawl` project, so a mistake can't reach unrelated projects on the host. For

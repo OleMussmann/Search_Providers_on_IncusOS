@@ -27,7 +27,9 @@ x-common-env: &common-env
 
 services:
   redis:
-    image: docker.io/redis:alpine
+    # Literal pin: 8.10.0-alpine. No x-update: block — managed manually for
+    # now; still declared in versions.env so all image refs live in one place.
+    image: docker.io/redis:${REDIS_TAG}
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -37,7 +39,10 @@ services:
         compress: "true"
 
   rabbitmq:
-    image: docker.io/rabbitmq:3-management
+    # Unmanaged literal: 3-management is frozen upstream; major-version
+    # migration is tracked separately. Variable kept in versions.env for
+    # consistency with the other image refs.
+    image: docker.io/rabbitmq:${RABBITMQ_TAG}
     restart: unless-stopped
     environment:
       HOME: /var/lib/rabbitmq
@@ -53,7 +58,11 @@ services:
 
   nuq-postgres:
     <<: *common-service
-    image: ghcr.io/firecrawl/nuq-postgres:latest
+    image: ghcr.io/firecrawl/nuq-postgres:latest@${NUQ_POSTGRES_DIGEST}
+    x-update:
+      mode: digest
+      volume: vol-pgdata
+      version_cmd: [postgres, --version]
     restart: unless-stopped
     command: -c cron.database_name=firecrawl
     environment:
@@ -77,7 +86,9 @@ services:
   # already ships psql + the SQL), so a half-finished initdb can't leave the
   # nuq schema missing.
   nuq-init:
-    image: ghcr.io/firecrawl/nuq-postgres:latest
+    # No x-update: block — this one-shot service uses the same digest as
+    # nuq-postgres; one pin drives both.
+    image: ghcr.io/firecrawl/nuq-postgres:latest@${NUQ_POSTGRES_DIGEST}
     entrypoint: ["psql"]
     command: >
       -v ON_ERROR_STOP=1
@@ -93,7 +104,11 @@ services:
 
   playwright-service:
     <<: *common-service
-    image: ghcr.io/firecrawl/playwright-service:latest
+    image: ghcr.io/firecrawl/playwright-service:latest@${PLAYWRIGHT_SERVICE_DIGEST}
+    x-update:
+      mode: digest
+      volume: none
+      version_cmd: [sh, -c, "sha256sum /usr/src/app/api.ts /usr/src/app/package.json /usr/src/app/pnpm-lock.yaml"]
     restart: unless-stopped
     environment:
       PORT: 3000
@@ -111,7 +126,13 @@ services:
 
   searxng:
     <<: *common-service
-    image: docker.io/searxng/searxng:latest
+    image: docker.io/searxng/searxng:${SEARXNG_TAG}
+    x-update:
+      mode: tag
+      order: pushed
+      tag_re: '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}-[0-9a-f]{9}$'
+      volume: none
+      version_cmd: [grep, -E, '^VERSION_STRING', /usr/local/searxng/searx/version_frozen.py]
     restart: unless-stopped
     environment:
       # The image declares VOLUME /etc/searxng, which Incus honors with a
@@ -137,7 +158,12 @@ services:
 
   api:
     <<: *common-service
-    image: ghcr.io/firecrawl/firecrawl:latest
+    image: ghcr.io/firecrawl/firecrawl:${FIRECRAWL_TAG}
+    x-update:
+      mode: tag
+      tag_re: '^[0-9]+\.[0-9]+\.[0-9]+$'
+      volume: none
+      version_cmd: [cat, /app/BUILD_SHA]
     environment:
       <<: *common-env
       HOST: "0.0.0.0"

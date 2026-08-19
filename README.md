@@ -12,12 +12,12 @@ over Tailscale.
 | `redis` | `docker.io/redis:alpine` | Rate limiting / caching |
 | `rabbitmq` | `docker.io/rabbitmq:3-management` | AMQP broker for Firecrawl's NUQ queue system |
 | `nuq-postgres` | `ghcr.io/firecrawl/nuq-postgres:latest` | Queue/job persistence (NUQ schema pre-baked into the image) |
-| `nuq-init` | `ghcr.io/firecrawl/nuq-postgres:latest` | One-shot: replays the NUQ schema, then exits. `api` waits on it completing successfully |
+| `nuq-init` | `ghcr.io/firecrawl/nuq-postgres:latest` | One-shot: replays the NUQ schema, then exits. `firecrawl` waits on it completing successfully |
 | `playwright-service` | `ghcr.io/firecrawl/playwright-service:latest` | Headless browser rendering for JS-heavy pages |
 | `searxng` | `docker.io/searxng/searxng:latest` | Metasearch — used both by Firecrawl's `/search` endpoint and directly by agents for lightweight overview searches |
-| `api` | `ghcr.io/firecrawl/firecrawl:latest` | Main Firecrawl process — runs as a single "harness" container that also spawns internal workers |
+| `firecrawl` | `ghcr.io/firecrawl/firecrawl:latest` | Main Firecrawl process — runs as a single "harness" container that also spawns internal workers |
 
-Only `api` and `searxng` are reachable from outside the Incus project, and only over
+Only `firecrawl` and `searxng` are reachable from outside the Incus project, and only over
 Tailscale (never the public internet). Everything else — `redis`, `rabbitmq`,
 `nuq-postgres`, `nuq-init`, `playwright-service` — is internal-only.
 
@@ -104,7 +104,7 @@ path (`/admin/<key>/queues`), so avoiding `/` and spaces there matters too.
 
 `compose.incus.yaml` is gitignored (it holds your real Tailscale IP); the committed
 template `compose.incus.yaml.example` ships with a placeholder.
-Replace it with your own IncusOS host's Tailscale IP for both the `api` (port 3002) and
+Replace it with your own IncusOS host's Tailscale IP for both the `firecrawl` (port 3002) and
 `searxng` (port 8888→8080) mappings. Binding to the Tailscale address specifically — rather
 than `0.0.0.0` — is what keeps these services off the public internet, so don't drop the
 host-IP prefix from those port mappings.
@@ -113,7 +113,7 @@ Both mappings use **long-form ports with `x-incus-compose.nat: true`** (kernel N
 mode, incus-compose 1.1.0+). This is faster than the default userspace proxy (which
 routes through the host's loopback and appears to the service as `127.0.0.1`).
 
-**Gotcha — `api`'s port lives ONLY in the overlay, not in `compose.yaml`.** Compose
+**Gotcha — `firecrawl`'s port lives ONLY in the overlay, not in `compose.yaml`.** Compose
 *merges* port lists across files; it does not replace. `compose.yaml` declaring
 `ports: ["3002:3002"]` alongside the overlay's NAT entry produced two devices both named
 `proxy-3002`, and the userspace `127.0.0.1` entry won the name collision — breaking
@@ -203,7 +203,7 @@ incus-compose --env-file .env --env-file versions.env up -d
 incus-compose --env-file .env --env-file versions.env ps -a
 
 # Follow logs
-incus-compose --env-file .env --env-file versions.env logs -f api
+incus-compose --env-file .env --env-file versions.env logs -f firecrawl
 
 # Stop and remove containers (keeps volumes and cached images)
 incus-compose --env-file .env --env-file versions.env down
@@ -264,7 +264,7 @@ that doesn't obviously point at its cause.
 
 - **Don't add a healthcheck to `rabbitmq`.** The `ic-healthd` sidecar latches the first
   failed probe into `unhealthy` and never re-probes, and RabbitMQ needs ~12s+ to boot. Any
-  probe here therefore blocks `api` permanently, since `api` depends on it. Firecrawl
+  probe here therefore blocks `firecrawl` permanently, since it depends on it. Firecrawl
   reconnects to AMQP on its own, so the healthcheck buys nothing. Healthchecks on
   faster-booting services (`nuq-postgres`) are fine — note its generous `start_period`.
 - **`PSQL_PAGER: cat` on the Postgres services is load-bearing.** incus-compose gives the
@@ -272,10 +272,10 @@ that doesn't obviously point at its cause.
   blocks forever. Without it, initdb never finishes and the NUQ schema is never created —
   with no error, just a hang.
 - **`nuq-init` exists to recover from a half-finished initdb.** An interrupted init leaves
-  Postgres up but the NUQ schema missing, which surfaces much later as confusing `api`
+  Postgres up but the NUQ schema missing, which surfaces much later as confusing `firecrawl`
   errors rather than as a startup failure. `nuq-init` idempotently replays the image's own
   `010-nuq.sql` on every `up`, so that state can't persist. It reuses the `nuq-postgres`
-  image because that already ships both `psql` and the SQL file, and `api` gates on it via
+  image because that already ships both `psql` and the SQL file, and `firecrawl` gates on it via
   `service_completed_successfully`.
 - **SearXNG config can't be delivered by `configs:`** — see
   [the section above](#getting-that-config-into-the-container-why-it-isnt-configs).
@@ -307,7 +307,7 @@ that doesn't obviously point at its cause.
 - **`nuq-postgres` uses Firecrawl's own prebuilt image** (`ghcr.io/firecrawl/nuq-postgres`)
   rather than stock Postgres — it bakes in the NUQ schema init script. Currently amd64-only
   upstream; matters only if the host is arm64.
-- **`api` runs as a single harness process** that internally manages the API server plus all
+- **`firecrawl` runs as a single harness process** that internally manages the API server plus all
   workers, rather than as separate worker containers. No `command` override is set — the
   image's own default is relied on here, so this is worth re-checking if upstream changes
   its entrypoint.

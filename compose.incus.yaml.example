@@ -1,11 +1,11 @@
 # Copy to compose.incus.yaml and replace IncusOS_IP_ADDRESS with the
 # host's Tailscale IP. Long-form ports with x-incus-compose.nat: true opt
 # into kernel NAT proxy mode (needs Incus 7.2+; this host is 7.3).
-# The api port is declared ONLY here — compose.yaml must not also declare
+# The firecrawl port is declared ONLY here — compose.yaml must not also declare
 # it, since compose merges port lists and a duplicate proxy-3002 device
 # would collide (and the userspace 127.0.0.1 entry would win).
 services:
-  api:
+  firecrawl:
     ports:
       - published: "3002"
         target: "3002"

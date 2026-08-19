@@ -48,7 +48,7 @@ services:
       HOME: /var/lib/rabbitmq
     # No healthcheck: ic-healthd latches the first failure into `unhealthy` and
     # never re-probes, and rabbitmq needs ~12s+ to boot. Any probe here
-    # permanently blocks `api`. firecrawl reconnects to AMQP on its own.
+    # permanently blocks `firecrawl`. It reconnects to AMQP on its own.
     logging:
       driver: "json-file"
       options:
@@ -156,7 +156,7 @@ services:
         x-incus-compose:
           seed: true
 
-  api:
+  firecrawl:
     <<: *common-service
     image: ghcr.io/firecrawl/firecrawl:${FIRECRAWL_TAG}
     x-update:

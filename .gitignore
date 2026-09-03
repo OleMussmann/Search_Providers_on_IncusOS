@@ -1,4 +1,5 @@
 .env
 .claude
+.pi
 searxng/settings.yml
 compose.incus.yaml

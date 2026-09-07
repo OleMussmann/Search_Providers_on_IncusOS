@@ -302,6 +302,119 @@ that doesn't obviously point at its cause.
   anything in this stack. Expect an occasional `[["core.ac.uk", "HTTP error"]]` in
   `unresponsive_engines`; retrying the query works. Don't chase it as a config bug.
 
+## Backups
+
+**Snapshots are host-side — this repo makes none.** There is no `snapshots.*` key in
+`compose.yaml`, no cron unit, no `x-` extension that sets one up. Deploying this stack gives
+you **no** data protection until you arrange it on the Incus host yourself.
+
+Unusually for a stateful stack, there is very little here worth protecting, and that is worth
+saying outright rather than leaving to inference:
+
+| Volume | Holds | Worth protecting |
+|---|---|---|
+| `vol-pgdata` | The NUQ work queue | Marginal — a queue, not a record |
+| `vol-auto-searxng-etc-searxng` | The image's `VOLUME /etc/searxng` | No |
+| `vol-auto-searxng-var-cache-searxng` | SearXNG's cache | No |
+
+The two `vol-auto-*` volumes are created automatically from the image's own `VOLUME`
+declarations, and their contents are regenerated at boot. The config that matters is
+`searxng/settings.yml` in this repo, re-pushed into the container on every `up` — so there is
+nothing in them to lose. Losing `vol-pgdata` drops in-flight jobs, not history.
+
+So `down --volumes` here is closer to an inconvenience than a loss. The rest of this section is
+the mechanism, for when you decide otherwise — or want a rollback point before an upgrade.
+
+Names on the host are not the names in `compose.yaml`: incus-compose prefixes each volume with
+`vol-`, and the Incus project is `firecrawl` — taken from `compose.yaml`'s `name:` key, not
+from the directory. Volumes the image declares itself, rather than this file, show up as
+`vol-auto-<service>-<path>`.
+
+Every `incus` command below needs to be pointed at the right project. Running them as
+`incus-compose incus <args>` does that for you; plain `incus` needs an explicit `--project`.
+Substitute your own storage pool for `<pool>` (`incus storage list` — commonly `default`).
+
+### Option A — let Incus snapshot each volume on a schedule
+
+Incus can do this on its own, on any storage driver: ZFS and btrfs give cheap copy-on-write
+snapshots, LVM thin snapshots, and the `dir` driver falls back to a full copy.
+
+```
+incus-compose incus storage volume set <pool> vol-pgdata \
+  snapshots.schedule=@daily \
+  snapshots.expiry=4w
+```
+
+Then check what a volume actually carries, and what has been taken:
+
+```
+incus-compose incus storage volume show <pool> vol-pgdata
+incus-compose incus storage volume snapshot list <pool> vol-pgdata
+```
+
+Two behaviours here cost more time than they should:
+
+- **`@daily` is not midnight, and not the same moment for every volume.** Incus expands it to
+  `<minute> <hour> * * *`, where both fields are a *stable pseudo-random* value derived from
+  the volume's internal database id — deliberate load-spreading, "scheduled time obfuscation"
+  in the upstream source. So each volume fires once a day at its own fixed but arbitrary time,
+  and after you set a schedule it can take a full 24 h before every volume has a first
+  snapshot. An empty `snapshot list` an hour after setup is expected, not a fault. If you need
+  a predictable window, give a cron expression instead of the alias:
+  `snapshots.schedule="30 3 * * *"`.
+- **Expiry units are case-sensitive.** `S`econds, `M`inutes, `H`ours, `d`ays, `w`eeks,
+  `m`onths, `y`ears — `2m` is two months, `2M` is two minutes. `snapshots.expiry` applies to
+  hand-taken snapshots too, unless you pass `--no-expiry`.
+
+### Option B — `incus-compose backup`
+
+incus-compose can snapshot a project's data volumes into a separate backup project in one pass,
+which is the easier answer when you want every volume captured at the same moment:
+
+```
+incus-compose backup create --name pre-upgrade
+incus-compose backup list
+incus-compose backup verify <timestamp>
+incus-compose backup restore <timestamp>
+incus-compose backup delete --keep-last 7
+```
+
+It has no scheduler of its own — drive it from cron or a systemd timer. `--live` snapshots
+without stopping anything, which buys you a crash-consistent copy rather than a clean one. See
+`incus-compose backup --help`.
+
+### Taking and restoring one by hand
+
+Worth doing before any upgrade, whichever option you run:
+
+```
+incus-compose incus storage volume snapshot create <pool> vol-pgdata pre-upgrade
+```
+
+Restoring needs the volume idle — a custom volume in use by a running instance cannot be rolled
+back, so stop the stack first:
+
+```
+incus-compose down
+incus-compose incus storage volume snapshot restore <pool> vol-pgdata pre-upgrade
+incus-compose up -d
+```
+
+### Snapshots are not backups
+
+They live on the same pool as the data they protect. A dead disk, a destroyed pool or a
+mistaken `incus project delete` takes both. For anything you would genuinely miss, get a copy
+off the host:
+
+```
+incus-compose incus storage volume export <pool> vol-pgdata volume.tar.gz
+incus-compose incus storage volume copy <pool>/vol-pgdata <remote>:<pool>/vol-pgdata
+```
+
+`.env` is *not* covered by any of this — it never reaches the host, and it holds the Postgres
+credentials and `BULL_AUTH_KEY`. Back it up separately. `searxng/settings.yml` and
+`compose.incus.yaml` are committed here, so they need no separate treatment.
+
 ## Design choices
 
 - **`nuq-postgres` uses Firecrawl's own prebuilt image** (`ghcr.io/firecrawl/nuq-postgres`)

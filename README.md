@@ -76,6 +76,10 @@ Verify with `incus remote list` before running `incus-compose up`.
 ├── compose.incus.yaml    # Incus-specific overrides (Tailscale-scoped ports)
 ├── .env.example          # Template — copy to .env and fill in real secrets
 ├── .env                  # Real secrets (gitignored — never commit)
+├── incus/profiles/firecrawl/  # Boot order + crash watchdog, per service tier.
+│                              # Declarative: `incus profile edit` applies them.
+│                              # Attached via x-incus-compose.profiles in compose.yaml.
+│                              # Must exist before the first `up` — see Resilience.
 └── searxng/
     ├── settings.yml.example  # Template — copy to settings.yml and fill in real keys
     └── settings.yml          # SearXNG config; JSON format must stay enabled.
@@ -192,6 +196,11 @@ config on a tmpfs. It is unused and safe to ignore — but it means "there's a s
 ## Usage
 
 ```
+# One-time per host (and after any `down --project`): create the project and apply
+# the Incus profiles that carry boot order + the crash watchdog. See "Resilience"
+# below for the commands — `up` fails with "Requested profile ... doesn't exist"
+# and leaves the stack down if you skip this.
+
 # Start everything (detached — always use -d for anything long-running;
 # foreground mode's behavior on a killed/interrupted client process is
 # not something to rely on for lifecycle control)
@@ -257,6 +266,106 @@ points at a nonexistent file and SearXNG raises an `EnvironmentError` and refuse
 rather than silently serving defaults — check `incus-compose logs searxng`. Either way the
 failure is visible; the old `configs:` approach was the one that failed silently.
 
+## Resilience: boot order and crash recovery
+
+This stack declares four Incus profiles carrying boot order and a crash watchdog.
+**They must exist before the first `incus-compose up`** — `compose.yaml` attaches them
+per service via `x-incus-compose.profiles`, and `up` deletes the instance *before* it
+validates profiles, so a missing one leaves the stack down.
+
+Nothing creates them for you: incus-compose has no profile-creation path. Apply them
+with `incus profile edit`, which is desired-state and idempotent — the committed YAML
+*is* the profile:
+
+```
+# The project must exist first; incus-compose adopts a pre-existing one.
+incus project create firecrawl \
+  -c features.images=true -c features.profiles=true \
+  -c features.storage.buckets=true -c features.storage.volumes=true
+
+for p in boot-core boot-broker boot-support boot-app; do
+  incus --project firecrawl profile create "$p" </dev/null 2>/dev/null
+  incus --project firecrawl profile edit "$p" < "incus/profiles/firecrawl/$p.yaml"
+done
+```
+
+`</dev/null` on `profile create` is load-bearing: it accepts an optional YAML body on
+stdin and will otherwise block forever instead of creating the profile.
+
+> If you run several incus-compose stacks, this loop is worth lifting into a bootstrap
+> repo that walks `$STACK_DIRS` and applies each stack's committed profiles — the
+> mechanism is generic, only the YAML is stack-specific.
+
+### Why this is not just `incus config set`
+
+Two incus-compose facts force the profile route:
+
+- incus-compose has **no generic instance-config passthrough**. Its `x-incus-compose.*`
+  keys are limited to `devices`, `profiles`, `init`, `backup.pool` and `healthd.scope`.
+  A profile is the only way to attach arbitrary Incus config from the compose file.
+- `up --recreate` **wipes** config set by hand on an instance (verified). Since every
+  pin bump recreates instances, an `incus config set` fix would silently disappear at the
+  next `incus-compose-update` run — the worst kind of fix, because it looks applied.
+
+Profiles survive recreation because `compose.yaml` re-attaches them every time.
+
+### What the profiles do
+
+| Profile | Services | `priority` | `delay` | `autorestart` |
+|---|---|---|---|---|
+| `boot-core` | redis, nuq-postgres | 100 | — | yes |
+| `boot-broker` | rabbitmq | 90 | 20s | yes |
+| `boot-support` | playwright-service, searxng | 50 | — | yes |
+| `boot-app` | firecrawl | 10 | — | yes |
+
+`nuq-init` deliberately gets none: incus-compose already sets `boot.autostart: false` for
+its `restart: "no"`, and a watchdog on a one-shot that exits by design would loop forever.
+
+**`boot.autorestart`** is the Incus-native crash watchdog (API extension
+`instance_auto_restart`): up to 10 restarts in a sliding 1-minute window on unexpected
+exit. Firecrawl's crash-to-exit is ~38s (~1.5 restarts/min), far under that ceiling, so
+Incus keeps retrying rather than giving up. Measured behaviour: an 8s crash loop restarts
+indefinitely; a 5s crash loop exhausts the budget and stays stopped.
+
+**`boot.autostart.delay` on rabbitmq is the load-bearing ordering key.** Priority sets
+*order*, not *readiness* — it would still start firecrawl the moment rabbitmq's container
+exists, seconds before the broker accepts AMQP. `delay` means "wait N seconds after this
+instance starts before starting the next one", so it belongs on rabbitmq, holding the rest
+of the sequence back.
+
+> **Trap:** instances with **no** `boot.autostart.priority` start *ahead of* instances that
+> have one. Adding a service without a priority therefore silently puts it first. Give every
+> long-running service one of these profiles.
+
+### Why `restart: unless-stopped` was not enough
+
+incus-compose does not translate a compose `restart:` policy into `boot.autorestart`. It
+writes `user.healthcheck.restart`, a hint consumed by the **ic-healthd sidecar**. If that
+sidecar is not running, nothing in the stack has a restart policy at all.
+
+That is exactly what happened on 2026-09-14: ic-healthd did not come back after the host
+reboot, so `restart: unless-stopped` was inert, and a crashed firecrawl stayed down ~35h.
+`boot.autorestart` is enforced by the Incus daemon itself and needs no sidecar, which is
+why the fix lives there rather than in healthd.
+
+Giving ic-healthd its own `boot.autostart: true` so it returns after a reboot is worth
+doing, but it is **host state, not this stack's**: that profile lives in the shared
+`incus-compose` project and affects every incus-compose stack on the host. It is
+deliberately not shipped here.
+
+### Operational notes
+
+- `down --project` deletes the project *and its profiles*. Re-apply them before
+  bringing the stack back up.
+- A missing profile fails loudly but **late**: `up` deletes the instance before validating
+  profiles, so you get `error: Requested profile "..." doesn't exist` with the stack down.
+- Adding a profile to a *running* instance takes effect immediately and needs no restart —
+  `incus --project firecrawl profile add <instance> <profile>`.
+- Verify what is actually in effect:
+  ```
+  incus --project firecrawl config show firecrawl-1 --expanded | grep boot\.
+  ```
+
 ## Incus-specific gotchas
 
 These are the things that will bite you if you edit `compose.yaml`. Each one fails in a way
@@ -264,9 +373,18 @@ that doesn't obviously point at its cause.
 
 - **Don't add a healthcheck to `rabbitmq`.** The `ic-healthd` sidecar latches the first
   failed probe into `unhealthy` and never re-probes, and RabbitMQ needs ~12s+ to boot. Any
-  probe here therefore blocks `firecrawl` permanently, since it depends on it. Firecrawl
-  reconnects to AMQP on its own, so the healthcheck buys nothing. Healthchecks on
-  faster-booting services (`nuq-postgres`) are fine — note its generous `start_period`.
+  probe here therefore blocks `firecrawl` permanently, since it depends on it. Healthchecks
+  on faster-booting services (`nuq-postgres`) are fine — note its generous `start_period`.
+
+  This entry used to justify itself with "Firecrawl reconnects to AMQP on its own, so the
+  healthcheck buys nothing." **The reconnect half of that is false**, and it is what made
+  the 2026-09-14 outage last ~35 hours instead of seconds. Firecrawl's `extract-worker` and
+  `nuq-worker-*` throw an uncaught `AggregateError` when the broker is unreachable, and the
+  harness responds by terminating every process in the container — the container exits.
+  Verified 2026-09-15: `incus restart rabbitmq-1` drove `firecrawl-1` to `STOPPED` inside
+  5s. The reason to skip the healthcheck is only the latching behaviour above; what makes
+  broker loss survivable is [`boot.autorestart`](#resilience-boot-order-and-crash-recovery),
+  not any reconnect logic in Firecrawl.
 - **`PSQL_PAGER: cat` on the Postgres services is load-bearing.** incus-compose gives the
   entrypoint a TTY, so `psql` running the initdb scripts pipes its output into `less` and
   blocks forever. Without it, initdb never finishes and the NUQ schema is never created —

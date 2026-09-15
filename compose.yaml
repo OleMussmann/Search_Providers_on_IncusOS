@@ -31,6 +31,9 @@ services:
     # now; still declared in versions.env so all image refs live in one place.
     image: docker.io/redis:${REDIS_TAG}
     restart: unless-stopped
+    x-incus-compose:
+      # Boot order + crash watchdog. See incus/profiles/.
+      profiles: [default, boot-core]
     logging:
       driver: "json-file"
       options:
@@ -44,11 +47,22 @@ services:
     # consistency with the other image refs.
     image: docker.io/rabbitmq:${RABBITMQ_TAG}
     restart: unless-stopped
+    x-incus-compose:
+      # Boot order + crash watchdog. See incus/profiles/.
+      profiles: [default, boot-broker]
     environment:
       HOME: /var/lib/rabbitmq
     # No healthcheck: ic-healthd latches the first failure into `unhealthy` and
     # never re-probes, and rabbitmq needs ~12s+ to boot. Any probe here
-    # permanently blocks `firecrawl`. It reconnects to AMQP on its own.
+    # permanently blocks `firecrawl`.
+    #
+    # This comment used to add "It reconnects to AMQP on its own." That is
+    # false, and believing it cost a ~35h outage on 2026-09-14. Firecrawl's
+    # workers throw an uncaught AggregateError when the broker is unreachable
+    # and the harness then tears down every process in the container. Verified
+    # 2026-09-15: `incus restart rabbitmq-1` puts firecrawl in STOPPED within
+    # 5s. What makes that survivable is `boot.autorestart` (profile boot-app),
+    # which brought it back in ~5s unattended — not any reconnect logic.
     logging:
       driver: "json-file"
       options:
@@ -64,6 +78,9 @@ services:
       volume: vol-pgdata
       version_cmd: [postgres, --version]
     restart: unless-stopped
+    x-incus-compose:
+      # Boot order + crash watchdog. See incus/profiles/.
+      profiles: [default, boot-core]
     command: -c cron.database_name=firecrawl
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -110,6 +127,9 @@ services:
       volume: none
       version_cmd: [sh, -c, "sha256sum /usr/src/app/api.ts /usr/src/app/package.json /usr/src/app/pnpm-lock.yaml"]
     restart: unless-stopped
+    x-incus-compose:
+      # Boot order + crash watchdog. See incus/profiles/.
+      profiles: [default, boot-support]
     environment:
       PORT: 3000
       PROXY_SERVER: ${PROXY_SERVER:-}
@@ -134,6 +154,9 @@ services:
       volume: none
       version_cmd: [grep, -E, '^VERSION_STRING', /usr/local/searxng/searx/version_frozen.py]
     restart: unless-stopped
+    x-incus-compose:
+      # Boot order + crash watchdog. See incus/profiles/.
+      profiles: [default, boot-support]
     environment:
       # The image declares VOLUME /etc/searxng, which Incus honors with a
       # tmpfs. Anything written to that path in the stopped rootfs (`configs:`,
@@ -180,6 +203,9 @@ services:
       nuq-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    x-incus-compose:
+      # Boot order + crash watchdog. See incus/profiles/.
+      profiles: [default, boot-app]
     # Port published via compose.incus.yaml only (Tailscale-scoped + NAT).
     # Declaring it here too would merge with the overlay's entry, producing
     # a duplicate proxy-3002 device that collides on device name.

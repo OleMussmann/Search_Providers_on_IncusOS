@@ -1,0 +1,15 @@
+# Tier 1 — backing stores with no dependencies of their own.
+#
+# Highest boot priority: these must be up before anything that talks to them.
+# `boot.autorestart` is the Incus-native crash watchdog (API extension
+# `instance_auto_restart`): up to 10 restarts within a sliding 1-minute window
+# on unexpected exit. It is NOT set by incus-compose — a compose `restart:`
+# policy only becomes `user.healthcheck.restart`, which is a hint for the
+# ic-healthd sidecar and does nothing when that sidecar is not running.
+#
+# Applies to: redis, nuq-postgres
+config:
+  boot.autostart.priority: "100"
+  boot.autorestart: "true"
+description: "Search_Providers: tier-1 backing stores (start first, restart on crash)"
+devices: {}

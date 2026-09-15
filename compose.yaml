@@ -31,9 +31,10 @@ services:
     # now; still declared in versions.env so all image refs live in one place.
     image: docker.io/redis:${REDIS_TAG}
     restart: unless-stopped
-    x-incus-compose:
-      # Boot order + crash watchdog. See incus/profiles/.
-      profiles: [default, boot-core]
+    x-incus:
+      # Boot order + crash watchdog — see "Resilience" in README.md.
+      boot.autostart.priority: "100"
+      boot.autorestart: "true"
     logging:
       driver: "json-file"
       options:
@@ -47,9 +48,14 @@ services:
     # consistency with the other image refs.
     image: docker.io/rabbitmq:${RABBITMQ_TAG}
     restart: unless-stopped
-    x-incus-compose:
-      # Boot order + crash watchdog. See incus/profiles/.
-      profiles: [default, boot-broker]
+    x-incus:
+      # Boot order + crash watchdog — see "Resilience" in README.md.
+      boot.autostart.priority: "90"
+      # Wait 20s after rabbitmq starts before starting the next
+      # instance: priority sets order, not readiness, and rabbitmq
+      # needs ~12s+ before it accepts AMQP.
+      boot.autostart.delay: "20"
+      boot.autorestart: "true"
     environment:
       HOME: /var/lib/rabbitmq
     # No healthcheck: ic-healthd latches the first failure into `unhealthy` and
@@ -78,9 +84,10 @@ services:
       volume: vol-pgdata
       version_cmd: [postgres, --version]
     restart: unless-stopped
-    x-incus-compose:
-      # Boot order + crash watchdog. See incus/profiles/.
-      profiles: [default, boot-core]
+    x-incus:
+      # Boot order + crash watchdog — see "Resilience" in README.md.
+      boot.autostart.priority: "100"
+      boot.autorestart: "true"
     command: -c cron.database_name=firecrawl
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -127,9 +134,10 @@ services:
       volume: none
       version_cmd: [sh, -c, "sha256sum /usr/src/app/api.ts /usr/src/app/package.json /usr/src/app/pnpm-lock.yaml"]
     restart: unless-stopped
-    x-incus-compose:
-      # Boot order + crash watchdog. See incus/profiles/.
-      profiles: [default, boot-support]
+    x-incus:
+      # Boot order + crash watchdog — see "Resilience" in README.md.
+      boot.autostart.priority: "50"
+      boot.autorestart: "true"
     environment:
       PORT: 3000
       PROXY_SERVER: ${PROXY_SERVER:-}
@@ -154,9 +162,10 @@ services:
       volume: none
       version_cmd: [grep, -E, '^VERSION_STRING', /usr/local/searxng/searx/version_frozen.py]
     restart: unless-stopped
-    x-incus-compose:
-      # Boot order + crash watchdog. See incus/profiles/.
-      profiles: [default, boot-support]
+    x-incus:
+      # Boot order + crash watchdog — see "Resilience" in README.md.
+      boot.autostart.priority: "50"
+      boot.autorestart: "true"
     environment:
       # The image declares VOLUME /etc/searxng, which Incus honors with a
       # tmpfs. Anything written to that path in the stopped rootfs (`configs:`,
@@ -203,9 +212,10 @@ services:
       nuq-init:
         condition: service_completed_successfully
     restart: unless-stopped
-    x-incus-compose:
-      # Boot order + crash watchdog. See incus/profiles/.
-      profiles: [default, boot-app]
+    x-incus:
+      # Boot order + crash watchdog — see "Resilience" in README.md.
+      boot.autostart.priority: "10"
+      boot.autorestart: "true"
     # Port published via compose.incus.yaml only (Tailscale-scoped + NAT).
     # Declaring it here too would merge with the overlay's entry, producing
     # a duplicate proxy-3002 device that collides on device name.

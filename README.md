@@ -299,6 +299,49 @@ of the sequence back.
 > that have one. Adding a service without a priority therefore silently puts it first.
 > Give every long-running service a priority.
 
+### The healthcheck catches what the watchdog cannot
+
+`boot.autorestart` fires on **instance exit**. It cannot see a container that is
+running but broken — and that is a real state here. On 2026-09-16, after a host
+reboot, firecrawl's harness died leaving one orphaned `extract-worker` alive: the
+instance never exited, stayed `RUNNING`, served nothing, and nothing noticed.
+
+So `firecrawl` carries a healthcheck probing its own API:
+
+```yaml
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3002/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+```
+
+**Probe 3002, not the worker health ports.** A healthy firecrawl also answers
+`3004/health` (extract-worker) and `3005/liveness` (queue worker). During that
+outage 3002 and 3005 were dead but **3004 was still answering** — extract-worker
+was the survivor — so a probe on 3004 would have passed straight through it.
+
+**This is safe only because nothing `depends_on` firecrawl.** It is the top of the
+dependency graph, so a latched `unhealthy` restarts this container and stalls
+nothing else. The same probe on `rabbitmq` is forbidden for exactly the opposite
+reason — see the gotcha below.
+
+Measured end to end (2026-09-16), by `SIGSTOP`ing the api process to leave the
+container running with a dead API:
+
+| | |
+|---|---|
+| marked `unhealthy` | ~70s |
+| container restarted | ~160s |
+| API serving again | ~185s |
+
+Unattended, from a state that previously required a human to notice.
+
+Note `kill -9` on the api process behaves differently: the harness tears down every
+process, the container exits, and `boot.autorestart` recovers it in ~5s. The two
+mechanisms cover different failures and both are needed.
+
 ### Why `restart: unless-stopped` was not enough
 
 incus-compose does not translate a compose `restart:` policy into `boot.autorestart`. It
@@ -336,10 +379,12 @@ deliberately not shipped here.
 These are the things that will bite you if you edit `compose.yaml`. Each one fails in a way
 that doesn't obviously point at its cause.
 
-- **Don't add a healthcheck to `rabbitmq`.** The `ic-healthd` sidecar latches the first
-  failed probe into `unhealthy` and never re-probes, and RabbitMQ needs ~12s+ to boot. Any
-  probe here therefore blocks `firecrawl` permanently, since it depends on it. Healthchecks
-  on faster-booting services (`nuq-postgres`) are fine — note its generous `start_period`.
+- **Don't add a healthcheck to `rabbitmq`.** RabbitMQ needs ~12s+ to boot, and a probe
+  that goes `unhealthy` blocks `firecrawl` permanently, since `firecrawl` depends on it.
+  The danger is the **dependency direction**, not healthchecks as such: probes on
+  `nuq-postgres` (a dependency with a generous `start_period` and 30 retries) and on
+  `firecrawl` itself (which nothing depends on) both work fine and are load-bearing.
+  Before adding a probe anywhere, ask what gates on that service.
 
   This entry used to justify itself with "Firecrawl reconnects to AMQP on its own, so the
   healthcheck buys nothing." **The reconnect half of that is false**, and it is what made

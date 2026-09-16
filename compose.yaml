@@ -216,6 +216,31 @@ services:
       # Boot order + crash watchdog — see "Resilience" in README.md.
       boot.autostart.priority: "10"
       boot.autorestart: "true"
+    # Catches the half-started container that `boot.autorestart` structurally
+    # cannot: on 2026-09-16 the harness died leaving one orphaned worker alive,
+    # so the instance never exited, stayed `RUNNING`, and served nothing.
+    #
+    # Probe 3002 (the API) deliberately, NOT the worker health ports. During
+    # that failure 3002 and 3005 were dead but **3004 was still answering** —
+    # extract-worker was the process that survived — so a probe on 3004 would
+    # have passed straight through the outage. 3002 is both the user-facing
+    # contract and the thing that actually broke.
+    #
+    # Safe here only because nothing `depends_on` firecrawl: it is the top of
+    # the graph, so a latched `unhealthy` restarts this container and stalls
+    # nothing else. That is exactly why the same probe on `rabbitmq` is
+    # forbidden — see the gotcha in README.md.
+    #
+    # start_period is deliberately generous: cold start was ~30s on 2026-09-15
+    # and a post-reboot start can be slower. ic-healthd backs off restarts
+    # (5s -> 10s -> 20s -> 40s -> 60s max), so a wrong probe degrades to a
+    # slow visible restart loop on one leaf, not a silent stall.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3002/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
     # Port published via compose.incus.yaml only (Tailscale-scoped + NAT).
     # Declaring it here too would merge with the overlay's entry, producing
     # a duplicate proxy-3002 device that collides on device name.

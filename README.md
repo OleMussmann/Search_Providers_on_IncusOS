@@ -72,10 +72,9 @@ Verify with `incus remote list` before running `incus-compose up`.
 
 ```
 .
-├── compose.yaml          # Main service definitions (Compose spec)
-├── compose.incus.yaml    # Incus-specific overrides (Tailscale-scoped ports)
-├── .env.example          # Template — copy to .env and fill in real secrets
-├── .env                  # Real secrets (gitignored — never commit)
+├── compose.yaml          # Main service definitions (Compose spec), incl. Tailscale-scoped ports
+├── .env.example          # Template — copy to .env and fill in real values
+├── .env                  # Real secrets and the tailnet IP (gitignored — never commit)
 └── searxng/
     ├── settings.yml.example  # Template — copy to settings.yml and fill in real keys
     └── settings.yml          # SearXNG config; JSON format must stay enabled.
@@ -92,6 +91,7 @@ POSTGRES_USER=firecrawl
 POSTGRES_PASSWORD=<strong-password>
 POSTGRES_DB=firecrawl
 BULL_AUTH_KEY=<strong-secret>
+TAILNET_IP=<tailscale-ip>
 ```
 
 Generate strong values with:
@@ -102,24 +102,25 @@ Hex-only output sidesteps `.env` parsing pitfalls (`$` triggers variable interpo
 `#` starts a comment) and `BULL_AUTH_KEY` in particular gets pasted directly into a URL
 path (`/admin/<key>/queues`), so avoiding `/` and spaces there matters too.
 
-`compose.incus.yaml` is gitignored (it holds your real Tailscale IP); the committed
-template `compose.incus.yaml.example` ships with a placeholder.
-Replace it with your own IncusOS host's Tailscale IP for both the `firecrawl` (port 3002) and
-`searxng` (port 8888→8080) mappings. Binding to the Tailscale address specifically — rather
-than `0.0.0.0` — is what keeps these services off the public internet, so don't drop the
-host-IP prefix from those port mappings.
+`TAILNET_IP` is your IncusOS host's Tailscale IP. Both the `firecrawl` (port 3002) and
+`searxng` (port 8888→8080) mappings bind to that address specifically — rather than
+`0.0.0.0` — which is what keeps these services off the public internet. `compose.yaml` reads
+it as `${TAILNET_IP:?...}`, so `config` and `up` refuse to run while it is unset or empty;
+an empty `host_ip` would otherwise bind every interface.
 
 Both mappings use **long-form ports with `x-incus-compose.nat: true`** (kernel NAT proxy
 mode, incus-compose 1.1.0+). This is faster than the default userspace proxy (which
 routes through the host's loopback and appears to the service as `127.0.0.1`).
 
-**Gotcha — `firecrawl`'s port lives ONLY in the overlay, not in `compose.yaml`.** Compose
-*merges* port lists across files; it does not replace. `compose.yaml` declaring
-`ports: ["3002:3002"]` alongside the overlay's NAT entry produced two devices both named
-`proxy-3002`, and the userspace `127.0.0.1` entry won the name collision — breaking
-start with `Connect IP "127.0.0.1" must be one of the instance's static IPv4 addresses`.
-This was harmless pre-NAT (both entries were userspace); the NAT flip exposed it. The
-port is declared only in `compose.incus.yaml` now; don't re-add it to `compose.yaml`.
+**Gotcha — ports live in `compose.yaml` only; don't add a `compose.incus.yaml`.**
+incus-compose merges that file automatically whenever it exists, and Compose *merges* port
+lists across files rather than replacing them. A port declared in both produces two devices
+both named `proxy-<port>`, and a userspace `127.0.0.1` entry wins the name collision —
+breaking start with `Connect IP "127.0.0.1" must be one of the instance's static IPv4
+addresses`.
+
+**Port changes need `up`, not `restart`.** Proxy devices are written when the instance is
+created or ensured; restarting an instance never adds or removes one.
 
 Other proxy-NAT facts worth knowing (Incus server is 7.3):
 - NAT proxy needs Incus 7.2+ (or 7.0.1 LTS); below that the port is skipped with a
@@ -539,9 +540,10 @@ incus-compose incus storage volume export <pool> vol-pgdata volume.tar.gz
 incus-compose incus storage volume copy <pool>/vol-pgdata <remote>:<pool>/vol-pgdata
 ```
 
-`.env` is *not* covered by any of this — it never reaches the host, and it holds the Postgres
-credentials and `BULL_AUTH_KEY`. Back it up separately. `searxng/settings.yml` and
-`compose.incus.yaml` are committed here, so they need no separate treatment.
+`.env` and `searxng/settings.yml` are *not* covered by any of this. Both are gitignored and
+neither reaches a storage volume (`settings.yml` is re-pushed from the repo on every `up`):
+`.env` holds the Postgres credentials, `BULL_AUTH_KEY` and the tailnet IP, and
+`settings.yml` holds the SearXNG secret key and search API keys. Back them up separately.
 
 ## Design choices
 
@@ -560,7 +562,7 @@ credentials and `BULL_AUTH_KEY`. Back it up separately. `searxng/settings.yml` a
 
 Firecrawl's real `docker-compose.yaml` is the source of truth — this repo is a hand-adapted
 subset of it (prebuilt images instead of local builds, SearXNG added, Incus-specific tuning
-split into `compose.incus.yaml`). When Firecrawl changes required env vars, service
+such as Tailscale-scoped NAT ports). When Firecrawl changes required env vars, service
 dependencies, or default commands, those changes won't propagate here automatically. Worth
 periodically diffing against
 [`firecrawl/firecrawl`'s `docker-compose.yaml`](https://github.com/firecrawl/firecrawl/blob/main/docker-compose.yaml)

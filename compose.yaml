@@ -187,6 +187,20 @@ services:
         target: /etc/searxng-repo/settings.yml
         x-incus-compose:
           seed: true
+    # Long-form ports with x-incus-compose.nat: true opt into kernel NAT proxy
+    # mode (needs Incus 7.2+), which is faster than the userspace proxy.
+    #
+    # host_ip is the host's Tailscale address, which is what keeps this off
+    # the LAN and off the public internet. It comes from .env so the address
+    # stays out of git. `:?` is load-bearing: an unset or empty variable
+    # renders host_ip as "", which binds ALL interfaces with nothing but a
+    # warning. With `:?`, `config` and `up` refuse to run instead.
+    ports:
+      - published: "8888"
+        target: "8080"
+        host_ip: "${TAILNET_IP:?set TAILNET_IP to the host's Tailscale IP}"
+        x-incus-compose:
+          nat: true
 
   firecrawl:
     <<: *common-service
@@ -241,9 +255,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 180s
-    # Port published via compose.incus.yaml only (Tailscale-scoped + NAT).
-    # Declaring it here too would merge with the overlay's entry, producing
-    # a duplicate proxy-3002 device that collides on device name.
+    # Tailscale-scoped + NAT — see the comment on searxng's ports.
+    ports:
+      - published: "3002"
+        target: "3002"
+        host_ip: "${TAILNET_IP:?set TAILNET_IP to the host's Tailscale IP}"
+        x-incus-compose:
+          nat: true
     cpus: 4.0
     mem_limit: 8G
     memswap_limit: 8G
